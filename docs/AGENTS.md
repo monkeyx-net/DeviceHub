@@ -76,6 +76,7 @@ devhub pull DEV /remote/path local/file               copy from the device
 devhub install DEV game.zip | runtime.squashfs | URL  install with the device's own PortMaster (lock needed)
 devhub ports DEV                                      installed ports (read-only)
 devhub fe DEV start|stop|restart|status               front end (EmulationStation, ...)
+devhub usbnet DEV                                     USB-cabled device: route its internet through the PC again
 devhub shot DEV out.png                               screenshot of what is on screen
 devhub fps DEV [--for 30s]                            live frame rate, one line per second (no lock needed)
 devhub fps DEV start "label" / stop / list            tracked FPS session: avg, 1% low, min, worst frame

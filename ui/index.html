@@ -607,6 +607,14 @@ function card(d) {
   const pills = [...(d.oos ? [`<span class="pill warn" title="sessions cannot take it until you put it back in service">⛔ out of service</span>`] : []),
     `<span class="pill ${net[0]}">${net[1]}</span>`,`<span class="pill ${sp[0]}" title="${esc(m.msg || "")}">${esc(sshLabel)}</span>`];
   if (d.smb) pills.push(`<span class="pill ${r.smb ? "ok" : r.smb === false ? "bad" : "mute"}" title="${esc(d.smb)}">SMB</span>`);
+  if (d.usb_net) {
+    // USB cable: where the device's default route points (the PC's end of the link gives it the internet)
+    const u = r.usb || {}, gw = fresh && s.gw !== undefined ? s.gw : u.gateway, pc = usbPc(d.host);
+    const good = gw && pc && gw === pc, cls = !gw ? "mute" : good ? "ok" : "warn";
+    const tip = [good ? "the device's internet goes through the PC" : gw ? `route points at ${gw}, not the PC (${pc || "?"}): DeviceHub fixes it within 5 min, or More… > Fix USB network` : "no route known yet",
+      u.msg && "last fix: " + u.msg + (u.at ? " (" + hm(u.at) + ")" : ""), u.script && "script: " + u.script].filter(Boolean).join("\n");
+    pills.push(`<span class="pill ${cls}" title="${esc(tip)}">USB${gw ? " · via " + esc(gw) : ""}</span>`);
+  }
   if (d.fe_proc && fresh) {
     const on = s.fe && s.fe.length, alt = !on && d.fe_alt && s.fealt && s.fealt.length;
     pills.push(`<span class="pill ${on || alt ? "ok" : "bad"}" ${alt ? `title="${esc(d.fe_alt)} is running (counts as the front end being up)"` : ""}>${alt ? (d.fe_alt === "lightdm" ? "desktop" : esc(d.fe_alt) + " running")
@@ -637,6 +645,7 @@ function card(d) {
   let msgs = "";
   if (m.msg && m.state !== "up") msgs += `<div class="msg ${sp[0] === "bad" ? "bad" : sp[0] === "warn" ? "warn" : ""}">${esc(m.msg)}</div>`;
   if (r.status_err && m.state === "up") msgs += `<div class="msg warn">status: ${esc(r.status_err)}</div>`;
+  if (d.usb_net && r.usb && r.usb.ok === false && m.state === "up") msgs += `<div class="msg warn">USB network: ${esc(r.usb.msg)}</div>`;
   if (d.oos) msgs += `<div class="msg warn">Out of service since ${hm(d.oos_since)}${d.oos_note ? ": " + esc(d.oos_note) : ""}. DeviceHub keeps watching it, but sessions can't take it until you press <i>Put back in service</i>.</div>`;
 
   // ROCKNIX: which GPU driver is live (Mesa or vendor), and a switch in its settings still waiting for a reboot
@@ -685,6 +694,7 @@ function card(d) {
         <button class="small danger" data-act="shutdown" ${up ? "" : "disabled"}>Shut down</button>
         <button class="small" data-act="service">${d.oos ? "Put back in service" : "Take out of service"}</button>
         <button class="small" data-act="refresh">Refresh status</button>
+        ${d.usb_net ? `<button class="small" data-act="usbnet" ${up ? "" : "disabled"} title="USB Network Manager on the device re-applies its addresses and routes through the PC (sshd and the USB link stay up)">Fix USB network</button>` : ""}
         ${d.auth !== "manual" ? `<button class="small" data-act="copyopen">Copy open command</button>` : ""}
         ${d.smb ? `<button class="small" data-act="copysmb">Copy SMB path</button>` : ""}
         <button class="small" data-act="copyacq">Copy acquire command</button>
@@ -984,6 +994,7 @@ document.addEventListener("click", async e => {
       if (!confirm(`Close the shared SSH connection to ${d.name}? Sessions using it lose their link until you press Connect.`)) return;
       return act(api("POST", `/api/devices/${dev}/disconnect`));
     case "refresh": return act(api("POST", `/api/devices/${dev}/refresh`), "Refreshing…");
+    case "usbnet": snack("Asking the device to re-apply its USB network…"); return act(api("POST", `/api/devices/${dev}/usbnet`, {}));
     case "service": {
       if (d.oos) return act(api("POST", `/api/devices/${dev}/service`, { out: false }));
       const held = lk && !lk.holder.ui ? `\n\n${lk.holder.name} holds it now ("${lk.purpose}"): its lock stays, and it is asked to finish up and release.` : "";
@@ -2616,6 +2627,9 @@ const FIELDS = [
     { k: "smb", label: "SMB share", ph: "\\\\192.168.1.50\\share" },
     { k: "ports_dir", label: "Ports folder on the device", ph: "/userdata/roms/ports" },
     { k: "autoconnect", label: "Keep the shared connection open", type: "checkbox" },
+    { k: "usb_net", label: "On a USB cable (USB Network Manager on the device): follow it between 192.168.7.2 and 192.168.137.2 and keep its internet routed through this PC", type: "checkbox", wide: true },
+    { k: "usb_script", label: "USB Network Manager on the device", ph: "found automatically (/opt/system/Tools, /roms/tools, /roms/ports)", wide: true, mono: true, show: v => v.usb_net,
+      help: "1.5.0 or newer (it needs --refresh-net). DeviceHub never starts the USB link itself: that is [A] Start Services on the device." },
   ]],
   ["Hardware", [
     { k: "soc", label: "SoC" }, { k: "gpu", label: "GPU" },
@@ -2646,6 +2660,8 @@ const FIELDS = [
     { k: "notes", label: "Notes", type: "textarea", wide: true, ph: "e.g. never reboot over SSH; the user also tests on it" },
   ]],
 ];
+const USB_ADDRS = ["192.168.7.2", "192.168.137.2"];
+function usbPc(host) { return USB_ADDRS.includes(host) ? host.replace(/\.\d+$/, ".1") : ""; }
 const DEFAULTS = { port: 22, user: "root", auth: "password", cfw: "Knulli", guard: "enforce", autoconnect: true, poll: true, enabled: true, approval: "auto", stream: "auto" };
 
 function openEditor(d) {
@@ -2795,6 +2811,10 @@ $("#edbody").addEventListener("change", e => {
     const t = TYPES[e.target.value];
     if (t) [["soc", t[0]], ["gpu", t[1]], ["ram_mb", t[2]], ["screen", t[3]]].forEach(([k, val]) => { const el = $("#f_" + k); if (el && (!el.value || el.value === "0")) el.value = val; });
     const nm = $("#f_name"); if (nm && !nm.value) nm.value = e.target.value.replace(/^(Anbernic|TrimUI|Powkiddy) /, "");
+  }
+  if (id === "f_usb_net" && e.target.checked && !USB_ADDRS.includes($("#f_host").value.trim())) {
+    $("#f_host").value = USB_ADDRS[0];      // the address the device always has; DeviceHub moves it to .137.2 with internet sharing
+    $("#f_host").dispatchEvent(new Event("change", { bubbles: true }));
   }
   if (id === "f_host") {
     const host = e.target.value.trim(), old = $("#edbody")._prevHost || "";

@@ -6,6 +6,15 @@ tag `vX.Y.Z` on its commit. When you change DeviceHub: raise `VERSION`, add an e
 
 Releases before 1.8.0 were tagged afterwards, on the commit each one ended with; their code still says 1.0.
 
+## 1.15.0 (2026-11-11)
+- Handhelds on a USB cable: with *On a USB cable* (editor, Connection), a device run by
+  [USB Network Manager](https://github.com/Just-Luis/BatleXP-G350_USBNetworkManager) 1.5.0+ (Battle XP G350 and other
+  RK3326 handhelds without Wi-Fi, ArkOS/dArkOS) is followed between 192.168.7.2 and 192.168.137.2 when the PC's
+  internet sharing is switched, and its default route is pointed back at the PC (`--refresh-net`, or `--set-gateway`
+  when the PC answers no ping) on every new shared connection and when the status shows it pointing elsewhere. The card
+  shows the route; **Fix USB network** (More…), `devhub usbnet DEV` and `POST /api/devices/<dev>/usbnet` run it now.
+  Offline, the card says to press [A] Start Services on the device. See docs/GUIDE.md.
+
 ## 1.14.1 (2026-11-11)
 - Brings in 1.13.1 (the device editor shows why a save failed), which was made alongside 1.14.0.
 

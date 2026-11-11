@@ -93,6 +93,7 @@ A reading: `{"t": ms, "fps", "worst" (ms), "src", "kind": "app"|"flip"|"idle", "
 | `POST /api/devices/<dev>/install` | `upload` or `url`, `refresh` | lock needed; returns `job` |
 | `GET /api/jobs/<job>?lines=60` | — | progress and log of a job |
 | `POST /api/devices/<dev>/frontend` | `action`: `start`/`stop`/`restart`/`status` | lock needed for changes |
+| `POST /api/devices/<dev>/usbnet` | optional `gateway` (IPv4) | USB-cabled device: USB Network Manager `--refresh-net` (or `--set-gateway`); lock needed |
 | `POST /api/devices/<dev>/screenshot` | — | returns `file`; fetch it from `GET /shots/<file>` |
 | `GET /api/devices/<dev>/ports` | — | installed ports (read-only) |
 | `GET /api/state` | — | everything the dashboard shows: devices, locks, queues, sessions |

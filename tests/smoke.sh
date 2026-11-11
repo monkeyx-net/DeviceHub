@@ -68,4 +68,20 @@ $DH run smoketest --ro -- 'true' || fail "read-only run"
 $DH release smoketest --dirty "no front end on the fake device" >/dev/null || fail "release"
 api GET /api/state | python3 -c 'import json,sys; d=json.load(sys.stdin); v=[x for x in d["devices"] if x["id"]=="smoketest"][0]; sys.exit(0 if not v.get("lock") else 1)' ||
     fail "device not free after release"
+
+# USB-cabled device: a stand-in USB_Network_Manager.sh on the fake device; DeviceHub runs it once for the connection,
+# and devhub usbnet runs it again (with the lock)
+printf '#!/bin/bash\necho "$*" >> "%s/usb-calls"\n[ "$1" = --refresh-net ] && echo "gateway=192.168.7.1 ip=192.168.7.2"\n' "$T" > "$T/usbnm.sh"
+api PUT /api/devices/smoketest "{\"client\":\"ui\",\"device\":{\"usb_net\":true,\"usb_script\":\"$T/usbnm.sh\"}}" |
+    grep -q '"ok": true' || fail "usb_net not saved"
+for i in $(seq 40); do
+    [ -s "$T/usb-calls" ] && break
+    [ "$i" = 40 ] && fail "no --refresh-net on the connection"
+    sleep 0.5
+done
+$DH usbnet smoketest 2>&1 | grep -q "take the lock first" || fail "usbnet without the lock was allowed"
+$DH acquire smoketest "usb" --for 5m >/dev/null || fail "acquire for usbnet"
+$DH usbnet smoketest | grep -q "default route via 192.168.7.1" || fail "usbnet"
+$DH release smoketest --dirty "no front end on the fake device" >/dev/null || fail "release after usbnet"
+[ "$(cat "$T/usb-calls")" = "$(printf -- '--refresh-net\n--refresh-net')" ] || fail "usb calls: $(cat "$T/usb-calls")"
 echo "PASS ($DEVHUB_PLATFORM)"

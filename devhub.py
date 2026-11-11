@@ -818,6 +818,13 @@ def c_fe(a):
     return finish(call("POST", "/api/devices/%s/frontend" % a.dev, body, timeout=120))
 
 
+def c_usbnet(a):
+    body = ident(a)
+    if a.gateway:
+        body["gateway"] = a.gateway
+    return finish(call("POST", "/api/devices/%s/usbnet" % a.dev, body, timeout=90))
+
+
 def c_shot(a):
     import shutil
     r = call("POST", "/api/devices/%s/screenshot" % a.dev, ident(a), timeout=120)
@@ -1102,6 +1109,9 @@ def main(argv):
     s.add_argument("action", nargs="?", choices=["watch", "start", "stop", "list", "hook", "preload"])
     s.add_argument("arg", nargs="?", help="start: a label; hook: on or off")
     s.add_argument("--for", dest="for_", metavar="DURATION", help="watch: stop after this long, e.g. 30s")
+    s = sp("usbnet", c_usbnet, "USB-cabled device: route its internet through the PC again (lock needed)")
+    s.add_argument("dev")
+    s.add_argument("--gateway", metavar="IP", help="force the route through this address instead of the one that answers")
     s = sp("shot", c_shot, "framebuffer screenshot")
     s.add_argument("dev")
     s.add_argument("out", nargs="?")

@@ -32,7 +32,7 @@ HOST = BIND
 RUN = os.environ.get("DEVHUB_RUN") or ("/tmp/devhub-%d-%d" % (os.getuid(), PORT))
 ASKPASS = os.path.join(RUN, "askpass.sh")
 POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
-VERSION = "1.14.1"  # semantic versioning; see CHANGELOG.md (raise it, add an entry, tag the commit)
+VERSION = "1.15.0"  # semantic versioning; see CHANGELOG.md (raise it, add an entry, tag the commit)
 
 
 def detect_platform():
@@ -174,6 +174,10 @@ DEVICE_DEFAULTS = {
     "cards": [], "card": "",
     # Retro Catalog model id (retrocatalog.com/retro-handhelds/<id>): specs filled from there, linked on the card
     "rc_slug": "",
+    # on a USB cable instead of the network (USB Ethernet gadget run by USB Network Manager on the device): DeviceHub
+    # follows it between 192.168.7.2 and 192.168.137.2 and keeps its default route pointing at the PC
+    "usb_net": False,
+    "usb_script": "",            # USB_Network_Manager.sh on the device (empty: found in the usual folders)
 }
 CARD_FIELDS = ("cfw", "port", "user", "auth", "identity", "smb", "ports_dir", "pm_dir",
                "fe_proc", "fe_start", "fe_stop", "fe_reload", "fe_alt")
@@ -487,6 +491,8 @@ def clean_device(src, old=None):
     for k in ("socket", "identity"):
         if d[k] and not d[k].startswith("/"):
             raise ApiError(400, "%s must be an absolute WSL path" % k)
+    if d["usb_script"] and not re.match(r"^/[A-Za-z0-9._/ -]+$", d["usb_script"]):
+        raise ApiError(400, "usb_script: an absolute path on the device (letters, digits, . _ - / and spaces)")
     d["name"] = d["name"] or d["id"]
     if isinstance((src or {}).get("cards"), list):
         d["cards"] = clean_cards(d, src["cards"], (old or {}).get("cards") or [], (old or {}).get("cfw"))
@@ -944,6 +950,11 @@ def upkeep(dev):
         return
     alive, pid = master_alive(d)
     tcp = "open" if alive else tcp_state(d["host"], d["port"])   # no bare TCP probes (log noise on the device) while connected
+    if not tcp and d.get("usb_net"):
+        alt = usb_alt(d["host"])
+        if alt and tcp_state(alt, d["port"]):
+            d = usb_move(dev, d, alt)
+            tcp = tcp_state(d["host"], d["port"])
     online = tcp == "open"
     if online != r["online"]:
         if r["online"] is not None:
@@ -974,7 +985,7 @@ def upkeep(dev):
         elif dev in H.paused or not d["autoconnect"]:
             set_master(dev, "paused", "auto-connect is off")
         elif not online:
-            set_master(dev, "offline", "")
+            set_master(dev, "offline", usb_offline_msg(d, r["ssh_off"]) if d.get("usb_net") else "")
         elif m.get("block") and not m.get("retry"):
             if m["state"] != m["block"]:
                 set_master(dev, m["block"], m.get("msg", ""))
@@ -988,6 +999,129 @@ def upkeep(dev):
             alive = m["state"] == "up"
     if alive and d["poll"] and now() >= r["next_status"]:
         poll_status(dev, d)
+    if alive and d.get("usb_net"):
+        usb_upkeep(dev, d, pid)
+
+
+# ---------------------------------------------------------------- USB-tethered devices
+# A handheld without Wi-Fi can reach the PC over its USB-C port as a USB Ethernet gadget, set up on the device by
+# USB Network Manager (github.com/Just-Luis/BatleXP-G350_USBNetworkManager, ArkOS/dArkOS on the RK3326). The device
+# holds two addresses: 192.168.7.2 (the PC's adapter set to 192.168.7.1 by hand) and 192.168.137.2 (Windows Internet
+# Connection Sharing gives the adapter 192.168.137.1). Which one answers changes when the PC's sharing is switched, and
+# the device's default route has to follow, or it loses the internet (PortMaster downloads).
+# DeviceHub follows the address that answers, and asks the script itself to fix the route (--refresh-net: addresses
+# and route only, never the gadget or sshd, so it is safe over the SSH connection it repairs) on every new shared
+# connection and when the route points elsewhere. It never starts the gadget: that needs the device's own
+# [A] Start Services, and a copy of the script without the command-line modes is never run (it would take the screen).
+USB_ADDRS = ("192.168.7.2", "192.168.137.2")
+USB_RETRY_S = 300            # a route that still points elsewhere is fixed again after this long
+IPV4_RE = re.compile(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$")
+USB_SH = r"""
+F=""
+for f in "$SCRIPT" /opt/system/Tools/USB_Network_Manager.sh /roms/tools/USB_Network_Manager.sh \
+         /roms2/tools/USB_Network_Manager.sh /roms/ports/USB_Network_Manager.sh /roms2/ports/USB_Network_Manager.sh; do
+  [ -n "$f" ] && [ -f "$f" ] && { F=$f; break; }
+done
+[ -n "$F" ] || { echo "devhub_usb=missing"; exit 0; }
+grep -q -e '--refresh-net' "$F" || { echo "devhub_usb=old $F"; exit 0; }
+echo "devhub_usb=run $F"
+bash "$F" "$@" </dev/null 2>&1
+echo "devhub_rc=$?"
+"""
+
+
+def usb_alt(host):
+    """The other USB address of a device that answers at one of them (None for any other host)."""
+    return {USB_ADDRS[0]: USB_ADDRS[1], USB_ADDRS[1]: USB_ADDRS[0]}.get(host)
+
+
+def usb_pc_ip(host):
+    """The PC's end of the USB link: what the device's default route should point at (None: not a USB address)."""
+    return host.rsplit(".", 1)[0] + ".1" if host in USB_ADDRS else None
+
+
+def usb_move(dev, d, host):
+    """The device answers at its other USB address now: make that its host (SMB paths follow, as in an edit)."""
+    with H.lock:
+        nd = clean_device({"host": host}, d)
+        H.devices[dev] = nd
+        save_devices()
+    sharing = "on" if host == USB_ADDRS[1] else "off"
+    event(dev, "usb", "answers at %s now (was %s): the PC's internet sharing is %s" % (host, d["host"], sharing))
+    return nd
+
+
+def usb_offline_msg(d, ssh_off=False):
+    if ssh_off:
+        return ("the USB link is up but SSH is off: on the device open USB Network Manager (Tools) and press "
+                "[A] Start Services (it starts SSH)")
+    alt = usb_alt(d["host"])
+    where = "%s or %s" % (d["host"], alt) if alt else d["host"]
+    return ("no answer over USB at %s: on the device open USB Network Manager (Tools) and press [A] Start Services "
+            "(USB MODE must read WIRED PC); on the PC the adapter needs 192.168.7.1, or internet sharing" % where)
+
+
+def usb_run(dev, d, gateway="", why="", who=None):
+    """Run USB Network Manager on the device: --refresh-net (re-add both addresses, route through the PC address that
+    answers) or --set-gateway <ip>. Records what the device settled on in rt["usb"]; returns (ok, message)."""
+    if gateway and not IPV4_RE.match(gateway):
+        raise ApiError(400, "gateway must be an IPv4 address")
+    args = ["--set-gateway", gateway] if gateway else ["--refresh-net"]
+    r = rt(dev)
+    r["usb_try"] = now()
+    script = "SCRIPT=%s\n%s" % (shlex.quote(d.get("usb_script") or ""), USB_SH)
+    try:
+        rc, out, err = ssh_run(d, "sh -s -- " + " ".join(shlex.quote(a) for a in args), inp=script.encode(), timeout=45)
+    except subprocess.TimeoutExpired:
+        rc, out, err = -1, b"", b"timed out after 45 s"
+    text = out.decode("utf-8", "replace")
+    found = re.search(r"^devhub_usb=(\w+) ?(.*)$", text, re.M)
+    rcm = re.search(r"^devhub_rc=(\d+)", text, re.M)
+    gw = re.search(r"gateway=(\S+)", text)
+    ip = re.search(r"\bip=(\S+)", text)
+    state = found.group(1) if found else ""
+    path = found.group(2).strip() if found else ""
+    if state == "missing":
+        ok, msg = False, ("USB_Network_Manager.sh not found on the device (looked in /opt/system/Tools, /roms/tools, "
+                          "/roms/ports and /roms2): set its path under Edit > Connection")
+    elif state == "old":
+        ok, msg = False, "%s is a version without --refresh-net: update it to 1.5.0 or newer" % path
+    elif not found:
+        lines = (err.decode("utf-8", "replace") or text).strip().splitlines()
+        ok, msg = False, "could not run USB Network Manager: " + (lines[-1][:200] if lines else "ssh exit %d" % rc)
+    elif rcm and rcm.group(1) != "0":
+        tail = [x for x in text.splitlines() if x.strip() and not x.startswith("devhub_")]
+        ok, msg = False, "USB Network Manager exited %s: %s" % (rcm.group(1), (tail[-1] if tail else "no message")[:200])
+    elif not gateway and ip and ip.group(1) == "unknown" and usb_pc_ip(d["host"]):
+        # neither PC address answered its ping (Windows Firewall drops pings on a new network), but DeviceHub reaches
+        # the device at d["host"], so the PC's end of the link is known: set the route through it
+        return usb_run(dev, d, usb_pc_ip(d["host"]), (why + "; " if why else "") + "the PC did not answer ping", who)
+    else:
+        ok = True
+        msg = "default route via %s" % gw.group(1) if gw else "network settings re-applied"
+        if ip and IPV4_RE.match(ip.group(1)):
+            msg += " (device %s)" % ip.group(1)
+    prev = r.get("usb") or {}
+    with H.lock:
+        r["usb"] = {"ok": ok, "msg": msg, "at": now(), "script": path or prev.get("script", ""),
+                    "gateway": gw.group(1) if gw else prev.get("gateway", "")}
+        r["next_status"] = 0       # the card shows the new route on the next status
+    if who or msg != prev.get("msg"):
+        event(dev, "usb", "%s%s" % (msg, " (%s)" % why if why else ""), who)
+    return ok, msg
+
+
+def usb_upkeep(dev, d, pid):
+    """A new shared connection to a USB device: have the device re-apply its addresses and route (the PC's sharing
+    may have changed since). Later, when its default route no longer points at the PC: once every USB_RETRY_S."""
+    r = rt(dev)
+    if r.get("usb_pid") != pid:
+        r["usb_pid"] = pid
+        usb_run(dev, d, why="connected")
+        return
+    st, want = r.get("status") or {}, usb_pc_ip(d["host"])
+    if want and "gw" in st and st["gw"] != want and now() - r.get("usb_try", 0) >= USB_RETRY_S:
+        usb_run(dev, d, why="its route pointed at %s, not the PC (%s)" % (st["gw"] or "nothing", want))
 
 
 # ---------------------------------------------------------------- device status
@@ -1016,6 +1150,7 @@ echo "temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)"
 [ -n "$PD" ] && df -k "$PD" 2>/dev/null | awk 'NR==2 {print "disk=" $4 " " $2}'
 echo "os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")"
 echo "kernel=$(uname -r)"
+[ -n "$USB" ] && echo "gw=$(awk '$2 == "00000000" {print $3; exit}' /proc/net/route 2>/dev/null)"
 grep -s VmRSS /proc/[0-9]*/status | awk '$2 > 15000 {split($1, a, "/"); print a[3], $2}' | sort -k2 -nr | head -6 |
 while read pid rss; do echo "proc=$pid $rss $(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-200)"; done
 [ -n "$W" ] && echo "watch=$(grep -ls -- "$W" /proc/[0-9]*/cmdline 2>/dev/null | wc -l)"
@@ -1047,10 +1182,10 @@ def grep_pat(s):
 
 
 def probe_script(d, watch=""):
-    return "FEALT=%s; FE=%s; PD=%s; W=%s; GPUDRV=%s\n%s" % (shlex.quote(d.get("fe_alt") or ""), shlex.quote(d["fe_proc"]),
-                                                             shlex.quote(d["ports_dir"]),
-                                                  shlex.quote(grep_pat(watch) if watch else ""),
-                                                  "1" if d.get("cfw") == "ROCKNIX" else "", PROBE)
+    return "FEALT=%s; FE=%s; PD=%s; W=%s; GPUDRV=%s; USB=%s\n%s" % (
+        shlex.quote(d.get("fe_alt") or ""), shlex.quote(d["fe_proc"]), shlex.quote(d["ports_dir"]),
+        shlex.quote(grep_pat(watch) if watch else ""), "1" if d.get("cfw") == "ROCKNIX" else "",
+        "1" if d.get("usb_net") else "", PROBE)
 
 
 def proc_name(cmd):
@@ -1096,6 +1231,8 @@ def parse_status(text, d):
                 st["disk"] = {"avail": int(a), "total": int(t)}
             elif k in ("load", "batst", "os", "kernel", "gpucfg", "gpuinfo"):
                 st[k] = v
+            elif k == "gw":      # /proc/net/route: the default route's gateway, little-endian hex ("" = no default route)
+                st["gw"] = socket.inet_ntoa(struct.pack("<I", int(v, 16))) if v else ""
             elif k == "gpudrv":
                 mods = v.split()
                 st["gpu_drv_raw"] = " ".join(mods)
@@ -3124,6 +3261,7 @@ def device_public(d):
     v["rc"] = {k: rc.get(k) for k in ("name", "url", "cpu", "size", "aspect", "battery", "released", "os", "storage")} if rc else None
     v["paused"] = dev in H.paused
     v["rt"] = {"online": r["online"], "ssh_off": r.get("ssh_off", False), "smb": r["smb"], "changed": r["changed"], "reach_at": r["reach_at"],
+               "usb": r.get("usb"),
                "master": {k: x for k, x in r["master"].items() if k not in ("retry",)},
                "status": r["status"], "status_at": r["status_at"], "status_err": r["status_err"]}
     lk = H.locks.get(dev)
@@ -3962,6 +4100,23 @@ def r_frontend(body, q, dev):
     rt(dev)["poke"] = True
     event(dev, "frontend", "%s by %s: %s" % (action, c["name"], msg), c["name"])
     return with_notices(c, {"ok": ok, "msg": msg})
+
+
+@route("POST", r"/api/devices/([a-z0-9_-]+)/usbnet")
+def r_usbnet(body, q, dev):
+    """USB-tethered device: re-apply its addresses and route through the PC (USB Network Manager --refresh-net), or
+    force the route through {"gateway": ip} (--set-gateway). Never touches the gadget or sshd."""
+    d = need_device(dev)
+    c = caller(body)
+    if not d.get("usb_net"):
+        raise ApiError(400, "%s is not set up as a USB-connected device (Edit > Connection)" % dname(d))
+    need_lock_for(dev, d, c, "USB network")
+    if rt(dev)["master"]["state"] != "up" and d["auth"] != "key":
+        raise ApiError(503, "shared connection to %s is %s" % (dname(d), rt(dev)["master"]["state"]))
+    gw = str(body.get("gateway") or "").strip()
+    ok, msg = usb_run(dev, d, gw, who=c["name"])
+    rt(dev)["poke"] = True
+    return with_notices(c, {"ok": ok, "msg": msg, "usb": rt(dev).get("usb")})
 
 
 # ---------------------------------------------------------------- live screen stream (the fbstream protocol)

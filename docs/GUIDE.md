@@ -137,6 +137,29 @@ agents see [AGENTS.md](AGENTS.md).
 *Also counts as the front end running* (`fe_alt`, e.g. `lightdm`) makes a normal desktop count as a clean, running
 front end (the card says "desktop"); desktop programs never count as an app left running.
 
+## Handhelds on a USB cable
+
+A handheld without Wi-Fi (Battle XP G350 and other RK3326 devices on ArkOS/dArkOS) can join over its USB-C port as a
+USB Ethernet adapter with [USB Network Manager](https://github.com/Just-Luis/BatleXP-G350_USBNetworkManager) 1.5.0 or
+newer. Set it up as its README says (the script in `tools/`, **[A] Start Services** on the device, the PC's adapter at
+`192.168.7.1`, optionally Windows internet sharing), then add the device with *On a USB cable* ticked (IP
+`192.168.7.2`, CFW dArkOS or ArkOS). DeviceHub then:
+
+- follows the device between `192.168.7.2` and `192.168.137.2`: switching the PC's internet sharing on gives the
+  adapter `192.168.137.1`, and the device answers only at its `.137.2` address (the card's IP and SMB path change,
+  and the event log says so);
+- runs `USB_Network_Manager.sh --refresh-net` on the device on every new shared connection, so its default route
+  points at the PC again and it has the internet (PortMaster). It changes addresses and the route only, never the
+  USB gadget or sshd, so it is safe over the connection it repairs. If the PC answers no ping (Windows Firewall), the
+  route is set through the PC address DeviceHub reaches the device by (`--set-gateway`);
+- shows the route on the card (*USB · via 192.168.137.1*; amber when it does not point at the PC, fixed again within
+  5 minutes), with **More… > Fix USB network** to run it now (`devhub usbnet DEV` for agents, with the lock).
+
+It never starts the USB link itself: when the device does not answer at either address, the card says to press
+[A] Start Services on it. A copy of the script older than 1.5.0 is never run (it would draw its menu on the screen);
+the card asks for an update. The script is looked for in `/opt/system/Tools`, `/roms/tools`, `/roms/ports` (and
+`/roms2/...`), or set its path in the editor. Under WSL the device must be reachable from WSL (`ping 192.168.7.2`).
+
 ## Your own CFW presets
 
 `data/presets.json` adds presets to the editor's *CFW* menu (restart DeviceHub after changing it). Any preset field
