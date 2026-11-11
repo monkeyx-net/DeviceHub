@@ -2630,6 +2630,7 @@ const FIELDS = [
     { k: "usb_net", label: "On a USB cable (USB Network Manager on the device): follow it between 192.168.7.2 and 192.168.137.2 and keep its internet routed through this PC", type: "checkbox", wide: true },
     { k: "usb_script", label: "USB Network Manager on the device", ph: "found automatically (/opt/system/Tools, /roms/tools, /roms/ports)", wide: true, mono: true, show: v => v.usb_net,
       help: "1.5.0 or newer (it needs --refresh-net). DeviceHub never starts the USB link itself: that is [A] Start Services on the device." },
+    { k: "_usbhost", special: "usbhost", show: v => v.usb_net, wide: true },
   ]],
   ["Hardware", [
     { k: "soc", label: "SoC" }, { k: "gpu", label: "GPU" },
@@ -2719,6 +2720,7 @@ function field(f, v, d) {
       ${has ? `<button type="button" class="small danger" id="pwclear">Remove</button>` : ""}
     </div><small>Stored only by DeviceHub, never shown again or sent to sessions; it opens the shared connection.</small></label>`;
   }
+  if (f.special === "usbhost") return `<div class="f wide" data-show="${f.k}" id="usbhostbox"><span>This PC's end of the cable</span><div class="sub">checking…</div></div>`;
   if (f.type === "hidden") return `<input type="hidden" id="${id}" value="${esc(v[f.k] || "")}"><div class="f wide" id="rcnote">${rcNote(v.rc_slug)}</div>`;
   if (f.type === "checkbox") return `<label class="${cls}" data-show="${f.k}"><input id="${id}" type="checkbox" ${v[f.k] ? "checked" : ""}><span>${(CARD_KEYS.includes(f.k) || f.k === "_pw") && edCards.length > 1 ? "▣ " : ""}${f.label}</span></label>`;
   let input;
@@ -2774,6 +2776,43 @@ function syncShow() {
   for (const [, fs] of FIELDS) for (const f of fs) if (f.show) {
     const el = document.querySelector(`#edbody [data-show="${f.k}"]`); if (el) el.style.display = f.show(v) ? "" : "none";
   }
+  const ub = $("#usbhostbox");
+  if (ub && v.usb_net && !ub.dataset.loaded) { ub.dataset.loaded = "1"; usbHostLoad(); }
+}
+// This PC's end of USB cables (Linux + NetworkManager): status, and Set up buttons that show the commands first
+let USBHOST = null;
+async function usbHostLoad() {
+  const box = $("#usbhostbox"); if (!box) return;
+  const st = USBHOST = await api("GET", "/api/usb-host");
+  const head = `<span>This PC's end of the cable</span>`;
+  if (st.ok === false) { box.innerHTML = head + `<div class="msg bad">${esc(st.error || "no answer")}</div>`; return; }
+  if (!st.supported) { box.innerHTML = head + `<small>${esc(st.msg)}</small>`; return; }
+  const p = st.profile, ifs = st.ifaces || [];
+  const lines = [
+    `NetworkManager profile <span class="mono">${esc(st.con)}</span>: ${p ? `<b>${p.mode === "share" ? "sharing this PC's internet" : p.mode === "direct" ? "direct, no internet" : esc(p.mode)}</b> · <span class="mono">${esc(p.addresses)}</span>` : "<b>not set up</b>"}`,
+    ifs.length ? ifs.map(i => `cable interface <span class="mono">${esc(i.name)}</span> (USB ${esc(i.usb)}): ${esc(i.ipv4.join(", ") || "no address")}`).join("<br>")
+      : "no handheld on a USB cable right now (press [A] Start Services on it)",
+  ];
+  const blk = (st.blockers || []).map(b => `<div class="msg warn">${esc(b)}</div>`).join("");
+  const warn = (st.warnings || []).map(w => `<div class="msg">${esc(w)}</div>`).join("");
+  const dis = st.blockers && st.blockers.length ? "disabled" : "";
+  box.innerHTML = head + `<div class="sub">${lines.join("<br>")}</div>${blk}${warn}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+      <button type="button" class="small" data-uh="share" ${dis || (!st.dnsmasq ? "disabled" : "")} title="ipv4 shared at 192.168.137.1: NAT to this PC's internet (the device routes through .137.1 first)">Set up this PC: share its internet</button>
+      <button type="button" class="small" data-uh="direct" ${dis} title="192.168.7.1: SSH and SMB only, the device gets no internet">Set up without internet</button>
+      ${p ? `<button type="button" class="small danger" data-uh="remove" ${dis}>Remove</button>` : ""}
+      <button type="button" class="small" data-uh="reload">Check again</button>
+    </div>
+    <small>One profile for every handheld on a cable (it only takes interfaces named dhusb*, never a phone's tethering). The commands are shown before anything changes; <span class="mono">devhub usb-host</span> does the same in a terminal.</small>`;
+}
+async function usbHostAct(mode) {
+  if (mode === "reload") return usbHostLoad();
+  const cmds = (USBHOST && USBHOST.plans && USBHOST.plans[mode]) || [];
+  if (!cmds.length) return snack("nothing to change");
+  if (!confirm(`Change this PC's network settings? DeviceHub runs:\n\n${cmds.join("\n")}`)) return;
+  const j = await api("POST", "/api/usb-host", { mode });
+  if (j.ok === false) snack(j.error || "failed", true); else snack(j.msg);
+  usbHostLoad();
 }
 function applyPreset(v, cfw, prev) {
   const P = (S && S.presets) || {}, p = P[cfw] || {}, old = (prev && P[prev]) || {};
@@ -2831,6 +2870,7 @@ $("#edbody").addEventListener("change", e => {
 $("#edbody").addEventListener("click", async e => {
   const c = edCards[edIdx];
   if (e.target.id === "rcrefresh") return rcApply($("#f_rc_slug").value, true);
+  if (e.target.dataset && e.target.dataset.uh) return usbHostAct(e.target.dataset.uh);
   if (e.target.id === "pwclear" && editing && confirm(`Remove the saved password${edCards.length > 1 ? ` of the ${c.label} card` : ""}?`)) {
     await act(api("DELETE", `/api/devices/${editing}/password`, c.id ? { card: c.id } : {}), "Password removed");
     $("#ed").close();

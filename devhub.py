@@ -825,6 +825,61 @@ def c_usbnet(a):
     return finish(call("POST", "/api/devices/%s/usbnet" % a.dev, body, timeout=90))
 
 
+def c_usbhost(a):
+    """This PC's end of USB cables (Linux + NetworkManager). Without a mode: what it looks like. With one: shows the
+    nmcli commands, asks, and runs them here in your terminal (your desktop session, so NetworkManager lets you or asks
+    for your password) - never without a person at the keyboard."""
+    import subprocess
+    st = call("GET", "/api/usb-host")
+    if st.get("ok") is False:
+        return finish(st)
+    if not st.get("supported"):
+        print(st.get("msg") or "not supported here", file=sys.stderr)
+        return 1
+    prof = st.get("profile")
+    print("NetworkManager: %s · profile %s: %s" % (
+        "running" if st.get("nm") else "not running", st["con"],
+        "%s %s" % (prof["mode"], prof["addresses"]) if prof else "not set up"))
+    for i in st.get("ifaces") or []:
+        print("cable interface %s (USB %s): %s" % (i["name"], i["usb"], ", ".join(i["ipv4"]) or "no address"))
+    if not st.get("ifaces"):
+        print("no handheld on a USB cable right now (press [A] Start Services on it)")
+    for w in st.get("blockers", []) + st.get("warnings", []):
+        print("- " + w)
+    if not a.mode:
+        print("set up: devhub usb-host share   (this PC's internet for the device, at 192.168.137.1)\n"
+              "        devhub usb-host direct  (192.168.7.1, no internet)   ·   devhub usb-host remove")
+        return 0
+    if REMOTE:
+        print("DEVHUB_URL points at another machine: run this on the PC the cable is plugged into", file=sys.stderr)
+        return 1
+    if not st.get("udev"):
+        print("first, once: " + st["setup_cmd"], file=sys.stderr)
+        return 1
+    if a.mode == "share" and not st.get("dnsmasq"):
+        print("sharing needs dnsmasq first (Arch: sudo pacman -S dnsmasq)", file=sys.stderr)
+        return 1
+    cmds = st["argv"][a.mode]
+    if not cmds:
+        print("nothing to change")
+        return 0
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("this changes the PC's network settings: run it in a terminal yourself", file=sys.stderr)
+        return 1
+    print("\nThis runs:")
+    for c in st["plans"][a.mode]:
+        print("  " + c)
+    if input("Go ahead? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("left as it was")
+        return 1
+    for c in cmds:
+        if subprocess.call([c[0], "--ask"] + c[1:]) != 0:
+            print("stopped: %s failed" % " ".join(c[:3]), file=sys.stderr)
+            return 1
+    print("done")
+    return 0
+
+
 def c_shot(a):
     import shutil
     r = call("POST", "/api/devices/%s/screenshot" % a.dev, ident(a), timeout=120)
@@ -1112,6 +1167,8 @@ def main(argv):
     s = sp("usbnet", c_usbnet, "USB-cabled device: route its internet through the PC again (lock needed)")
     s.add_argument("dev")
     s.add_argument("--gateway", metavar="IP", help="force the route through this address instead of the one that answers")
+    s = sp("usb-host", c_usbhost, "Linux: this PC's end of USB cables (NetworkManager), status or set up")
+    s.add_argument("mode", nargs="?", choices=["share", "direct", "remove"])
     s = sp("shot", c_shot, "framebuffer screenshot")
     s.add_argument("dev")
     s.add_argument("out", nargs="?")

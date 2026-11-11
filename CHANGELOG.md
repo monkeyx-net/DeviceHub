@@ -14,6 +14,11 @@ Releases before 1.8.0 were tagged afterwards, on the commit each one ended with;
   when the PC answers no ping) on every new shared connection and when the status shows it pointing elsewhere. The card
   shows the route; **Fix USB network** (More…), `devhub usbnet DEV` and `POST /api/devices/<dev>/usbnet` run it now.
   Offline, the card says to press [A] Start Services on the device. See docs/GUIDE.md.
+- Linux PCs (NetworkManager) set up their end of the cable from the editor: **This PC's end of the cable** shares the
+  PC's internet at 192.168.137.1 or gives 192.168.7.1, through one `devicehub-usb` profile, showing the `nmcli`
+  commands first; `devhub usb-host` does it in a terminal. `sudo setup/install.sh --usb-host` (once) names the cable's
+  interface `dhusb<N>` so a phone's USB tethering is never taken, and lets the service change NetworkManager
+  connections; `--remove` takes both rules away again.
 
 ## 1.14.1 (2026-11-11)
 - Brings in 1.13.1 (the device editor shows why a save failed), which was made alongside 1.14.0.

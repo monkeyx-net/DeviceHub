@@ -155,4 +155,83 @@ expect("probe: no default route", h.parse_status("gw=\n", d)["gw"], "")
 expect("probe asks for the route only on USB devices",
        ("USB=1" in h.probe_script(d), "USB=1" in h.probe_script(dict(d, usb_net=False))), (True, False))
 
+# ---- this PC's end (Linux + NetworkManager), with a stand-in nmcli that keeps the profile in a file
+BIN = os.path.join(T, "bin")
+os.makedirs(BIN)
+NM = os.path.join(T, "nm-profile")
+NMLOG = os.path.join(T, "nmcli-calls")
+with open(os.path.join(BIN, "nmcli"), "w") as f:
+    f.write("""#!/bin/sh
+echo "$*" >> "%(log)s"
+[ -n "$NM_DENY" ] && [ "$1" = connection ] && { echo "Error: Failed: Insufficient privileges" >&2; exit 1; }
+case "$*" in
+  "-t -f RUNNING general") echo running ;;
+  "-t -g ipv4.method,ipv4.addresses connection show devicehub-usb")
+    [ -f "%(nm)s" ] || { echo "Error: devicehub-usb - no such connection profile." >&2; exit 10; }; cat "%(nm)s" ;;
+  "connection add"*|"connection modify"*)
+    case "$*" in *"ipv4.method shared"*) printf 'shared\n192.168.137.1/24\n' ;; *) printf 'manual\n192.168.7.1/24\n' ;; esac > "%(nm)s" ;;
+  "connection delete devicehub-usb") rm -f "%(nm)s" ;;
+esac
+""" % {"log": NMLOG, "nm": NM})
+for n in ("nmcli", "dnsmasq"):
+    if n == "dnsmasq":
+        open(os.path.join(BIN, n), "w").write("#!/bin/sh\n")
+    os.chmod(os.path.join(BIN, n), 0o755)
+os.environ["PATH"] = BIN + os.pathsep + os.environ["PATH"]
+h.PLATFORM = "linux"
+udev, pk = os.path.join(T, "udev.rules"), os.path.join(T, "pk.rules")
+h.USBHOST_UDEV, h.USBHOST_POLKIT = udev, (pk,)
+h.usbhost_ifaces = lambda: [{"name": "dhusb0", "usb": "0525:a4a2", "named": True, "ipv4": []}]
+h.H.devices = {}
+
+
+def nmcalls():
+    try:
+        return [x for x in open(NMLOG).read().split("\n")[:-1] if "general" not in x and "connection show" not in x]
+    finally:
+        open(NMLOG, "w").close()
+
+
+st = h.usbhost_status()
+expect("no root setup yet: blocked", (st["supported"], st["nm"], len(st["blockers"])), (True, True, 1))
+try:
+    h.usbhost_apply("share")
+    expect("blocked apply refused", "ran", "refused")
+except h.ApiError as e:
+    expect("blocked apply refused, nothing changed", (e.code, nmcalls()), (409, []))
+open(udev, "w").close(); open(pk, "w").close()
+st = h.usbhost_status()
+expect("set up: nothing blocks", (st["blockers"], st["profile"]), ([], None))
+expect("share plan", [" ".join(c) for c in h.usbhost_plan("share", st)], [
+    "nmcli connection add type ethernet con-name devicehub-usb connection.autoconnect yes connection.autoconnect-priority 50 "
+    "match.interface-name dhusb* ipv6.method disabled ipv4.method shared ipv4.addresses 192.168.137.1/24",
+    "nmcli connection up devicehub-usb ifname dhusb0"])
+expect("remove with no profile: nothing", h.usbhost_plan("remove", st), [])
+h.usbhost_apply("share")
+expect("share applied", (len(nmcalls()), h.usbhost_status()["profile"]["mode"]), (2, "share"))
+h.usbhost_apply("direct")
+calls_ = nmcalls()
+expect("direct: the profile is modified, not added again", (calls_[0].startswith("connection modify devicehub-usb"),
+                                                             "ipv4.never-default yes" in calls_[0]), (True, True))
+expect("direct applied", h.usbhost_status()["profile"]["addresses"], "192.168.7.1/24")
+os.environ["NM_DENY"] = "1"
+try:
+    h.usbhost_apply("share")
+    expect("polkit refusal reported", "ok", "error")
+except h.ApiError as e:
+    expect("polkit refusal points at the one-time setup", "install.sh --usb-host" in str(e), True)
+del os.environ["NM_DENY"]
+h.usbhost_apply("remove")
+expect("removed", h.usbhost_status()["profile"], None)
+try:
+    h.usbhost_plan("everything")
+    expect("unknown mode refused", "ok", "refused")
+except h.ApiError:
+    expect("unknown mode refused", "refused", "refused")
+h.PLATFORM = "wsl"
+expect("WSL: Windows owns the adapter", h.usbhost_status()["supported"], False)
+expect("offline hint names Windows under WSL", "Windows" in h.usb_offline_msg(dict(h.DEVICE_DEFAULTS, host="192.168.7.2")), True)
+h.PLATFORM = "linux"
+expect("offline hint names Set up this PC on Linux", "Set up this PC" in h.usb_offline_msg(dict(h.DEVICE_DEFAULTS, host="192.168.7.2")), True)
+
 print("PASS (%d checks)" % checks)

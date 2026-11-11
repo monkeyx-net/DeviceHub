@@ -141,9 +141,28 @@ front end (the card says "desktop"); desktop programs never count as an app left
 
 A handheld without Wi-Fi (Battle XP G350 and other RK3326 devices on ArkOS/dArkOS) can join over its USB-C port as a
 USB Ethernet adapter with [USB Network Manager](https://github.com/Just-Luis/BatleXP-G350_USBNetworkManager) 1.5.0 or
-newer. Set it up as its README says (the script in `tools/`, **[A] Start Services** on the device, the PC's adapter at
-`192.168.7.1`, optionally Windows internet sharing), then add the device with *On a USB cable* ticked (IP
-`192.168.7.2`, CFW dArkOS or ArkOS). DeviceHub then:
+newer. Put the script in the card's `tools/` folder and press **[A] Start Services** on the device, set up the PC's end
+of the cable (below), then add the device with *On a USB cable* ticked (IP `192.168.7.2`, CFW dArkOS or ArkOS).
+
+**The PC's end on Linux** (NetworkManager: KDE, GNOME, ...): once, as root, `sudo setup/install.sh --usb-host`. It
+names the cable's interface `dhusb0` (a udev rule for the Linux USB Ethernet gadget, 0525:a4a1/a4a2, so a phone
+tethered over USB is never touched) and lets DeviceHub's user change NetworkManager connections (a polkit rule: the
+service runs outside your desktop session, where NetworkManager would refuse). Replug the cable afterwards. Then in the
+editor, under *On a USB cable*, **This PC's end of the cable** shows what is there and sets it up; each button lists
+the exact `nmcli` commands before anything changes:
+
+- **Share its internet**: profile `devicehub-usb` in NetworkManager's shared mode at `192.168.137.1` (NAT to your
+  Wi-Fi or Ethernet; the device routes through `.137.1` first, so DeviceHub settles on `192.168.137.2`). Needs
+  `dnsmasq` installed (Arch: `pacman -S dnsmasq`; NetworkManager starts it, no service to enable). With ufw active,
+  also `sudo ufw route allow in on dhusb0`.
+- **Without internet**: `192.168.7.1`, SSH and SMB only.
+- **Remove** deletes the profile. `sudo setup/install.sh --remove` also removes both rules.
+
+`devhub usb-host [share|direct|remove]` does the same in a terminal (it runs `nmcli --ask` as you, so it works without
+the polkit rule; the udev rule is still needed). **On Windows** set the adapter to `192.168.7.1`, or share the
+internet to it, as USB Network Manager's README says.
+
+DeviceHub then:
 
 - follows the device between `192.168.7.2` and `192.168.137.2`: switching the PC's internet sharing on gives the
   adapter `192.168.137.1`, and the device answers only at its `.137.2` address (the card's IP and SMB path change,
@@ -159,6 +178,7 @@ It never starts the USB link itself: when the device does not answer at either a
 [A] Start Services on it. A copy of the script older than 1.5.0 is never run (it would draw its menu on the screen);
 the card asks for an update. The script is looked for in `/opt/system/Tools`, `/roms/tools`, `/roms/ports` (and
 `/roms2/...`), or set its path in the editor. Under WSL the device must be reachable from WSL (`ping 192.168.7.2`).
+In server mode (Docker) the hub can't change the host's network: set the PC's end with `nmcli` on the host.
 
 ## Your own CFW presets
 

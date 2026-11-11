@@ -1057,8 +1057,10 @@ def usb_offline_msg(d, ssh_off=False):
                 "[A] Start Services (it starts SSH)")
     alt = usb_alt(d["host"])
     where = "%s or %s" % (d["host"], alt) if alt else d["host"]
+    pc = ("this PC's end of the cable: Edit > Connection > Set up this PC" if PLATFORM == "linux" else
+          "on Windows the adapter needs 192.168.7.1, or internet sharing")
     return ("no answer over USB at %s: on the device open USB Network Manager (Tools) and press [A] Start Services "
-            "(USB MODE must read WIRED PC); on the PC the adapter needs 192.168.7.1, or internet sharing" % where)
+            "(USB MODE must read WIRED PC); %s" % (where, pc))
 
 
 def usb_run(dev, d, gateway="", why="", who=None):
@@ -1109,6 +1111,142 @@ def usb_run(dev, d, gateway="", why="", who=None):
     if who or msg != prev.get("msg"):
         event(dev, "usb", "%s%s" % (msg, " (%s)" % why if why else ""), who)
     return ok, msg
+
+
+# This PC's end of the cable, on Linux with NetworkManager (Windows: the adapter's settings and internet sharing, by
+# hand). The device's USB Ethernet gadget (g_ether, USB id 0525:a4a1/a4a2) shows up here as a network interface;
+# `sudo setup/install.sh --usb-host` names it dhusb<N> (a udev rule, so phones tethered over USB are never touched) and
+# lets DeviceHub's user change NetworkManager connections (a polkit rule: the service runs outside your desktop
+# session, where NetworkManager would otherwise refuse). One profile, devicehub-usb, then serves every such cable:
+#   share   ipv4 shared at 192.168.137.1 (NAT to this PC's internet; the device routes through .137.1 first)
+#   direct  192.168.7.1, no internet for the device (SSH and SMB only)
+USBHOST_CON = "devicehub-usb"
+USBHOST_IFACES = "dhusb*"
+USBHOST_UDEV = "/etc/udev/rules.d/70-devhub-usb.rules"
+USBHOST_POLKIT = ("/etc/polkit-1/rules.d/49-devhub-networkmanager.rules",
+                  "/etc/polkit-1/localauthority/50-local.d/49-devhub-networkmanager.pkla")
+USBHOST_MODES = {
+    "share": ["ipv4.method", "shared", "ipv4.addresses", "192.168.137.1/24"],
+    "direct": ["ipv4.method", "manual", "ipv4.addresses", "192.168.7.1/24", "ipv4.never-default", "yes"],
+}
+USBHOST_SETUP = "sudo %s/setup/install.sh --usb-host" % HERE
+
+
+def usbhost_run(argv, timeout=20):
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return 127, "", "%s not found" % argv[0]
+    except subprocess.TimeoutExpired:
+        return 124, "", "%s timed out" % argv[0]
+
+
+def usbhost_ifaces():
+    """Network interfaces of USB gadgets on this PC: [{"name", "usb" (vendor:product), "ipv4": [...]}]."""
+    out = []
+    for n in sorted(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else []:
+        dev = os.path.realpath(os.path.join("/sys/class/net", n, "device"))
+        ids = []
+        for f in ("idVendor", "idProduct"):
+            try:
+                with open(os.path.join(os.path.dirname(dev), f)) as fh:
+                    ids.append(fh.read().strip())
+            except OSError:
+                break
+        if n.startswith("dhusb") or (len(ids) == 2 and ids[0] == "0525" and ids[1] in ("a4a1", "a4a2")):
+            rc, o, _ = usbhost_run(["ip", "-4", "-o", "addr", "show", "dev", n], 5)
+            out.append({"name": n, "usb": ":".join(ids), "named": n.startswith("dhusb"),
+                        "ipv4": re.findall(r"inet (\S+)", o) if rc == 0 else []})
+    return out
+
+
+def usbhost_status():
+    """What this PC's end looks like, and what is missing before Set up can work."""
+    st = {"platform": PLATFORM, "supported": PLATFORM == "linux", "con": USBHOST_CON, "setup_cmd": USBHOST_SETUP,
+          "blockers": [], "warnings": []}
+    if PLATFORM != "linux":
+        st["msg"] = ("DeviceHub runs under WSL: the cable's adapter belongs to Windows. Set it to 192.168.7.1 (or share "
+                     "the internet to it) in Windows, as USB Network Manager's README says.")
+        return st
+    st["nmcli"] = bool(shutil.which("nmcli"))
+    rc, o, _ = usbhost_run(["nmcli", "-t", "-f", "RUNNING", "general"], 10) if st["nmcli"] else (1, "", "")
+    st["nm"] = rc == 0 and o.strip() == "running"
+    st["dnsmasq"] = bool(shutil.which("dnsmasq"))
+    st["udev"] = os.path.isfile(USBHOST_UDEV)
+    st["polkit"] = any(os.path.isfile(f) for f in USBHOST_POLKIT)
+    st["ifaces"] = usbhost_ifaces()
+    st["profile"] = None
+    if st["nm"]:
+        rc, o, _ = usbhost_run(["nmcli", "-t", "-g", "ipv4.method,ipv4.addresses", "connection", "show", USBHOST_CON], 10)
+        if rc == 0:
+            lines = (o.splitlines() + ["", ""])[:2]
+            st["profile"] = {"method": lines[0], "addresses": lines[1],
+                             "mode": "share" if lines[0] == "shared" else "direct" if lines[0] == "manual" else lines[0]}
+    if not st["nmcli"]:
+        st["blockers"].append("NetworkManager's nmcli is not installed")
+    elif not st["nm"]:
+        st["blockers"].append("NetworkManager is not running (systemctl enable --now NetworkManager)")
+    if not st["udev"] or not st["polkit"]:
+        st["blockers"].append("one-time setup as root: %s (names the cable's interface dhusb0 and lets DeviceHub change "
+                              "NetworkManager connections)" % USBHOST_SETUP)
+    if not st["dnsmasq"]:
+        st["warnings"].append("sharing the internet needs dnsmasq (NetworkManager starts it): Arch sudo pacman -S dnsmasq, "
+                              "Debian/Ubuntu sudo apt install dnsmasq-base")
+    if any(i for i in st["ifaces"] if not i["named"]) and st["udev"]:
+        st["warnings"].append("the cable's interface is not named dhusb yet: unplug and replug the cable (or press [B] "
+                              "Stop and [A] Start Services on the device)")
+    rc, o, _ = usbhost_run(["systemctl", "is-active", "ufw"], 5)
+    if o.strip() == "active":
+        st["warnings"].append("ufw is active and drops forwarded traffic by default: for the device's internet run "
+                              "sudo ufw route allow in on dhusb0")
+    return st
+
+
+def usbhost_plan(mode, st=None):
+    """The nmcli commands Set up runs for mode share/direct/remove (argv lists)."""
+    if mode not in ("share", "direct", "remove"):
+        raise ApiError(400, "mode must be share, direct or remove")
+    st = st or usbhost_status()
+    exists = st.get("profile") is not None
+    if mode == "remove":
+        return [["nmcli", "connection", "delete", USBHOST_CON]] if exists else []
+    props = ["connection.autoconnect", "yes", "connection.autoconnect-priority", "50",
+             "match.interface-name", USBHOST_IFACES, "ipv6.method", "disabled"] + USBHOST_MODES[mode]
+    cmds = [["nmcli", "connection", "modify", USBHOST_CON] + props if exists else
+            ["nmcli", "connection", "add", "type", "ethernet", "con-name", USBHOST_CON] + props]
+    for i in st.get("ifaces") or []:
+        if i["named"]:
+            cmds.append(["nmcli", "connection", "up", USBHOST_CON, "ifname", i["name"]])
+    return cmds
+
+
+def usbhost_apply(mode):
+    st = usbhost_status()
+    if not st["supported"]:
+        raise ApiError(400, st["msg"])
+    if st["blockers"]:
+        raise ApiError(409, "; ".join(st["blockers"]))
+    if mode == "share" and not st["dnsmasq"]:
+        raise ApiError(409, st["warnings"][0])
+    done = []
+    for argv in usbhost_plan(mode, st):
+        rc, o, e = usbhost_run(argv, 45)
+        if rc != 0:
+            err = (e or o).strip().splitlines()
+            msg = err[-1] if err else "exit %d" % rc
+            if re.search(r"not authorized|insufficient privileges|permission denied", msg, re.I):
+                msg += (" - NetworkManager refused DeviceHub: run %s once (or devhub usb-host in a terminal)"
+                        % USBHOST_SETUP)
+            raise ApiError(500, "%s: %s" % (" ".join(argv[:3]), msg))
+        done.append(" ".join(shlex.quote(a) for a in argv))
+    event(None, "usb", "this PC's end of the USB cable: %s (%s)" % (
+        {"share": "sharing its internet at 192.168.137.1", "direct": "192.168.7.1, no internet sharing",
+         "remove": "profile %s removed" % USBHOST_CON}[mode], "; ".join(done) or "nothing to do"))
+    for dev, d in list(H.devices.items()):
+        if d.get("usb_net"):
+            rt(dev)["poke"] = True
+    return done
 
 
 def usb_upkeep(dev, d, pid):
@@ -4117,6 +4255,30 @@ def r_usbnet(body, q, dev):
     ok, msg = usb_run(dev, d, gw, who=c["name"])
     rt(dev)["poke"] = True
     return with_notices(c, {"ok": ok, "msg": msg, "usb": rt(dev).get("usb")})
+
+
+@route("GET", "/api/usb-host")
+def r_usbhost(body, q):
+    """This PC's end of USB cables (Linux + NetworkManager): status, and the commands Set up would run per mode."""
+    st = usbhost_status()
+    if st["supported"]:
+        st["plans"] = {m: [" ".join(shlex.quote(a) for a in c) for c in usbhost_plan(m, st)]
+                       for m in ("share", "direct", "remove")}
+        st["argv"] = {m: usbhost_plan(m, st) for m in ("share", "direct", "remove")}
+    return st
+
+
+@route("POST", "/api/usb-host")
+def r_usbhost_apply(body, q):
+    """Set up this PC's end of USB cables: {"mode": "share" | "direct" | "remove"}. The user only (it changes this
+    PC's network settings)."""
+    c = caller(body)
+    if not c.get("ui"):
+        raise ApiError(403, "only the user changes this PC's network settings (DeviceHub UI, or devhub usb-host in a "
+                            "terminal)")
+    done = usbhost_apply(str(body.get("mode") or ""))
+    return {"ok": True, "done": done, "status": usbhost_status(),
+            "msg": "done: " + "; ".join(done) if done else "nothing to change"}
 
 
 # ---------------------------------------------------------------- live screen stream (the fbstream protocol)
